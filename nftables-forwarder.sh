@@ -10,7 +10,17 @@ usage() {
   cat <<'EOF'
 nftables-forwarder.sh - nftables 端口转发管理脚本
 
-用法：
+直接运行会进入菜单：
+  sudo ./nftables-forwarder.sh
+
+功能选项：
+  1) 添加端口转发
+  2) 显示当前端口转发
+  3) 删除端口转发
+  4) 清空全部规则
+  5) 退出
+
+命令行用法：
   sudo ./nftables-forwarder.sh add <协议> <监听端口> <目标IP> <目标端口> [网卡]
   sudo ./nftables-forwarder.sh list
   sudo ./nftables-forwarder.sh delete <协议> <监听端口> [目标IP] [目标端口]
@@ -23,17 +33,76 @@ nftables-forwarder.sh - nftables 端口转发管理脚本
   sudo ./nftables-forwarder.sh delete tcp 8080
   sudo ./nftables-forwarder.sh flush
 
-说明：
-  add     添加端口转发规则
-  list    显示当前由本脚本记录/创建的端口转发信息
-  delete  删除匹配的端口转发规则
-  flush   删除整个 inet portfw 表和本地记录
-
 注意：
   - 需要 Linux + nftables。
   - add/delete/flush 通常需要 root 权限。
   - 本脚本管理 table: inet portfw，请不要把其它手写规则放进同名 table。
 EOF
+}
+
+show_menu() {
+  cat <<'EOF'
+========================================
+ nftables 端口转发管理工具
+========================================
+1) 添加端口转发
+2) 显示当前端口转发
+3) 删除端口转发
+4) 清空全部规则
+5) 退出
+========================================
+EOF
+}
+
+interactive_menu() {
+  while true; do
+    show_menu
+    echo -n "请选择功能 [1-5]: "
+    read -r choice
+    case "$choice" in
+      1) prompt_add_rule ;;
+      2) list_rules ;;
+      3) prompt_delete_rule ;;
+      4) prompt_flush_rules ;;
+      5|q|Q) echo "已退出。"; return 0 ;;
+      *) echo "无效选择，请输入 1-5。" ;;
+    esac
+    echo
+    read -r -p "按 Enter 返回菜单..." _
+  done
+}
+
+prompt_add_rule() {
+  echo
+  echo "添加端口转发"
+  read -r -p "协议 tcp/udp [tcp]: " proto
+  proto="${proto:-tcp}"
+  read -r -p "监听端口，例如 8080: " listen_port
+  read -r -p "目标 IP，例如 10.0.0.2: " target_ip
+  read -r -p "目标端口，例如 80: " target_port
+  read -r -p "入站网卡，可留空，例如 eth0: " iface
+  add_rule "$proto" "$listen_port" "$target_ip" "$target_port" "$iface"
+}
+
+prompt_delete_rule() {
+  echo
+  echo "删除端口转发"
+  read -r -p "协议 tcp/udp [tcp]: " proto
+  proto="${proto:-tcp}"
+  read -r -p "监听端口，例如 8080: " listen_port
+  read -r -p "目标 IP，可留空: " target_ip
+  read -r -p "目标端口，可留空: " target_port
+  delete_rule "$proto" "$listen_port" "$target_ip" "$target_port"
+}
+
+prompt_flush_rules() {
+  echo
+  read -r -p "确认清空所有由本脚本创建的规则？输入 yes 继续: " answer
+  if [[ "$answer" == "yes" ]]; then
+    flush_rules
+  else
+    echo "已取消。"
+  fi
 }
 
 need_cmd() {
@@ -121,7 +190,7 @@ add_rule() {
   if awk -F '\t' -v p="$proto" -v lp="$listen_port" -v ip="$target_ip" -v tp="$target_port" \
     '$1==p && $2==lp && $3==ip && $4==tp {found=1} END{exit !found}' "$STATE_FILE"; then
     echo "已存在：${proto} ${listen_port} -> ${target_ip}:${target_port}"
-    exit 0
+    return 0
   fi
 
   nft add rule inet "$TABLE" "$CHAIN_PREROUTING" $nat_rule
@@ -163,7 +232,7 @@ delete_rule() {
 
   if [[ ! -f "$STATE_FILE" || ! -s "$STATE_FILE" ]]; then
     echo "没有可删除的记录。"
-    exit 0
+    return 0
   fi
 
   local tmp
@@ -203,13 +272,18 @@ flush_rules() {
 
 main() {
   local cmd="${1:-}"
+  if [[ -z "$cmd" ]]; then
+    interactive_menu
+    return 0
+  fi
   shift || true
   case "$cmd" in
     add) add_rule "$@" ;;
     list|show) list_rules "$@" ;;
     delete|del|remove|rm) delete_rule "$@" ;;
     flush|clear) flush_rules "$@" ;;
-    -h|--help|help|"") usage ;;
+    menu) interactive_menu ;;
+    -h|--help|help) usage ;;
     *) echo "未知命令：$cmd" >&2; usage; exit 1 ;;
   esac
 }
