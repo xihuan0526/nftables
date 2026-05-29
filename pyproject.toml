@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nftables-forwarder"
+version = "0.1.0"
+description = "Small CLI tool to generate and apply nftables port forwarding rules"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [{name = "Xihuan"}]
+keywords = ["nftables", "port-forwarding", "linux", "nat", "cli"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
+]
+
+[project.scripts]
+nftables-forwarder = "nftables_forwarder.cli:main"
