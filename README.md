@@ -1,65 +1,141 @@
 # nftables-forwarder
 
-一个小型 Linux CLI 工具，用 `nftables` 生成/应用端口转发规则。
+一个 Linux 端口转发管理工具，核心使用 `nftables`。
 
-它适合把公网机器上的端口转发到内网机器，例如：
+现在提供两种用法：
 
-```text
-公网服务器:8080  ->  10.0.0.2:80
-公网服务器:5353/udp  ->  10.0.0.3:53/udp
-```
+1. **Shell 脚本版**：`nftables-forwarder.sh`，适合服务器直接运行。
+2. **Python CLI 版**：`nftables-forwarder`，适合生成 nft 脚本或做二次开发。
 
-## 功能
+## Shell 脚本版（推荐）
 
-- 生成 `nftables` NAT 端口转发脚本
-- 支持 TCP / UDP
-- 支持指定入站网卡，例如 `eth0`
-- 支持直接执行 `nft -f -` 应用规则
-- 支持删除工具创建的 nftables table
-- 默认 table 名：`portfw`
+脚本功能：
 
-## 安装
+- 添加端口转发
+- 显示当前端口转发信息
+- 删除指定端口转发
+- 清空本工具创建的所有端口转发
 
-```bash
-git clone https://github.com/xihuan0526/nftables.git
-cd nftables
-python3 -m pip install -e .
-```
+### 准备
 
 系统需要安装 nftables：
 
 ```bash
+sudo apt update
 sudo apt install nftables
 ```
 
-## 使用
-
-### 只生成规则，不应用
+下载仓库：
 
 ```bash
-nftables-forwarder 8080:10.0.0.2:80
+git clone https://github.com/xihuan0526/nftables.git
+cd nftables
+chmod +x nftables-forwarder.sh
 ```
 
-输出示例：
+### 添加端口转发
 
-```nft
-#!/usr/sbin/nft -f
-delete table inet portfw
+格式：
 
-table inet portfw {
-  chain prerouting {
-    type nat hook prerouting priority dstnat; policy accept;
-    tcp dport 8080 dnat ip to 10.0.0.2:80
-  }
-
-  chain forward {
-    type filter hook forward priority filter; policy accept;
-    ip daddr 10.0.0.2 tcp dport 80 accept
-  }
-}
+```bash
+sudo ./nftables-forwarder.sh add <协议> <监听端口> <目标IP> <目标端口> [网卡]
 ```
 
-### 指定网卡
+例子：
+
+```bash
+sudo ./nftables-forwarder.sh add tcp 8080 10.0.0.2 80 eth0
+```
+
+意思是：
+
+```text
+本机 eth0 的 8080/tcp  ->  10.0.0.2:80
+```
+
+UDP 示例：
+
+```bash
+sudo ./nftables-forwarder.sh add udp 5353 10.0.0.3 53 eth0
+```
+
+如果不想限制网卡，可以省略最后的网卡参数：
+
+```bash
+sudo ./nftables-forwarder.sh add tcp 8080 10.0.0.2 80
+```
+
+### 显示当前端口转发信息
+
+```bash
+sudo ./nftables-forwarder.sh list
+```
+
+也可以：
+
+```bash
+sudo ./nftables-forwarder.sh show
+```
+
+它会显示：
+
+- 本脚本记录的端口转发
+- 当前 `nftables` 中 `inet portfw` 表的规则
+
+### 删除端口转发
+
+按协议 + 监听端口删除：
+
+```bash
+sudo ./nftables-forwarder.sh delete tcp 8080
+```
+
+如果同一个监听端口有多条规则，可以指定目标 IP 和目标端口：
+
+```bash
+sudo ./nftables-forwarder.sh delete tcp 8080 10.0.0.2 80
+```
+
+也可以用简写：
+
+```bash
+sudo ./nftables-forwarder.sh rm tcp 8080
+```
+
+### 清空全部规则
+
+```bash
+sudo ./nftables-forwarder.sh flush
+```
+
+这会删除：
+
+- `inet portfw` 表
+- 本地记录文件 `/var/lib/nftables-forwarder/rules.tsv`
+
+### 帮助
+
+```bash
+./nftables-forwarder.sh --help
+```
+
+## 注意事项
+
+- 需要 Linux + nftables。
+- 添加/删除/清空规则通常需要 root 权限。
+- 本工具管理的 table 是：`inet portfw`。
+- 不要把其它手写 nftables 规则放进 `inet portfw`，因为 `flush` 会删除整个表。
+- 如果转发到内网机器，目标机器的回程路由/网关也要正确，否则连接可能回不来。
+
+## Python CLI 版
+
+### 安装
+
+```bash
+python3 -m pip install -e .
+```
+
+### 生成规则，不应用
 
 ```bash
 nftables-forwarder -i eth0 8080:10.0.0.2:80
@@ -80,64 +156,23 @@ nftables-forwarder \
   5353:10.0.0.3:53/udp
 ```
 
-### 应用规则
-
-需要 root 权限：
+### 直接应用
 
 ```bash
 sudo nftables-forwarder --apply --sysctl -i eth0 8080:10.0.0.2:80
 ```
 
-说明：
-
-- `--apply`：直接调用 `nft -f -` 应用规则
-- `--sysctl`：先执行 `sysctl -w net.ipv4.ip_forward=1`
-
-### 保存为文件
-
-```bash
-nftables-forwarder -i eth0 8080:10.0.0.2:80 -o portfw.nft
-sudo nft -f portfw.nft
-```
-
-### 删除规则
+### 删除 Python CLI 创建的 table
 
 ```bash
 sudo nftables-forwarder --delete --apply
 ```
 
-等价于：
-
-```nft
-delete table inet portfw
-```
-
-## 映射格式
-
-```text
-listen_port:target_ip:target_port[/protocol]
-```
-
-例子：
-
-```text
-8080:10.0.0.2:80
-5353:10.0.0.3:53/udp
-```
-
-默认协议是 `tcp`。
-
-## 注意
-
-- 需要 Linux + nftables。
-- 应用规则通常需要 root 权限。
-- 如果转发到内网机器，目标机器的回程路由/网关也要正确，否则连接可能回不来。
-- 本工具会重建指定 table（默认 `inet portfw`），不要把其它手写规则放进同名 table。
-
 ## 开发测试
 
 ```bash
 PYTHONPATH=src python3 -m unittest discover -s tests -v
+bash -n nftables-forwarder.sh
 ```
 
 ## License
