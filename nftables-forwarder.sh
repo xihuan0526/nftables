@@ -34,7 +34,7 @@ nftables-forwarder.sh - nftables 端口转发管理脚本
   sudo ./nftables-forwarder.sh flush
 
 注意：
-  - 需要 Linux + nftables。
+  - 需要 Linux + nftables；如果系统未安装 nftables，脚本会尝试用 apt 自动安装。
   - add/delete/flush 通常需要 root 权限。
   - 本脚本管理 table: inet portfw，请不要把其它手写规则放进同名 table。
 EOF
@@ -112,6 +112,33 @@ need_cmd() {
   }
 }
 
+ensure_nftables() {
+  if command -v nft >/dev/null 2>&1; then
+    return 0
+  fi
+
+  need_root_for_write
+
+  if command -v apt-get >/dev/null 2>&1; then
+    echo "检测到未安装 nftables，正在自动安装..."
+    apt-get update -y
+    apt-get install -y nftables
+  elif command -v apt >/dev/null 2>&1; then
+    echo "检测到未安装 nftables，正在自动安装..."
+    apt update -y
+    apt install -y nftables
+  else
+    echo "错误：未安装 nftables，且当前系统没有 apt/apt-get，无法自动安装。" >&2
+    echo "请手动安装 nftables 后再运行本脚本。" >&2
+    exit 127
+  fi
+
+  command -v nft >/dev/null 2>&1 || {
+    echo "错误：nftables 安装后仍找不到 nft 命令。" >&2
+    exit 127
+  }
+}
+
 need_root_for_write() {
   if [[ "${EUID}" -ne 0 ]]; then
     echo "错误：该操作需要 root 权限，请使用 sudo。" >&2
@@ -166,7 +193,7 @@ rule_key_matches() {
 
 add_rule() {
   need_root_for_write
-  need_cmd nft
+  ensure_nftables
   need_cmd sysctl
 
   local proto="${1:-}" listen_port="${2:-}" target_ip="${3:-}" target_port="${4:-}" iface="${5:-}"
@@ -201,7 +228,7 @@ add_rule() {
 }
 
 list_rules() {
-  need_cmd nft
+  ensure_nftables
   echo "nftables table: inet $TABLE"
   echo
 
@@ -222,7 +249,7 @@ list_rules() {
 
 delete_rule() {
   need_root_for_write
-  need_cmd nft
+  ensure_nftables
 
   local proto="${1:-}" listen_port="${2:-}" target_ip="${3:-}" target_port="${4:-}"
   [[ -n "$proto" && -n "$listen_port" ]] || { usage; exit 1; }
@@ -264,7 +291,7 @@ delete_rule() {
 
 flush_rules() {
   need_root_for_write
-  need_cmd nft
+  ensure_nftables
   nft delete table inet "$TABLE" 2>/dev/null || true
   rm -f "$STATE_FILE"
   echo "已清空 inet $TABLE 和本地记录。"

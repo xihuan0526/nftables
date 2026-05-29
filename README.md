@@ -15,28 +15,31 @@
 ## 功能
 
 - 交互式菜单操作
+- 自动检测 nftables；如果没有安装，会尝试自动执行 `apt update -y` 和 `apt install nftables -y`
 - 添加 TCP / UDP 端口转发
 - 显示当前端口转发信息
 - 删除指定端口转发
 - 清空本脚本创建的全部规则
 - 同时保留命令行参数模式，方便脚本化使用
 
-## 安装
+## 一键下载
 
-系统需要安装 nftables：
-
-```bash
-sudo apt update
-sudo apt install nftables
-```
-
-下载本仓库：
+不用 clone 整个仓库，直接下载脚本即可：
 
 ```bash
-git clone https://github.com/xihuan0526/nftables.git
-cd nftables
+wget https://raw.githubusercontent.com/xihuan0526/nftables/refs/heads/main/nftables-forwarder.sh
 chmod +x nftables-forwarder.sh
+sudo ./nftables-forwarder.sh
 ```
+
+如果系统没有安装 nftables，脚本会在需要使用 nftables 时自动尝试安装：
+
+```bash
+apt update -y
+apt install nftables -y
+```
+
+> 自动安装依赖需要 root 权限，所以推荐用 `sudo ./nftables-forwarder.sh` 运行。
 
 ## 交互式使用
 
@@ -154,7 +157,8 @@ inet portfw
 
 ## 注意事项
 
-- 需要 Linux + nftables。
+- 需要 Linux。
+- Debian / Ubuntu 系统未安装 nftables 时，脚本会尝试用 apt 自动安装。
 - 添加/删除/清空规则通常需要 root 权限。
 - 本工具管理的 table 是 `inet portfw`。
 - 不要把其它手写 nftables 规则放进 `inet portfw`，因为 `flush` 会删除整个表。
