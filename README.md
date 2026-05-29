@@ -1,30 +1,19 @@
-# nftables 端口转发管理脚本
+# nftables-forwarder
 
-一个纯 Shell 的 Linux 端口转发管理工具，底层使用 `nftables`。
+一个基于 `nftables` 的 Linux 端口转发管理脚本。
 
-运行脚本后会出现菜单，可以直接选择功能：
+特点：
 
-```text
-1) 添加端口转发
-2) 显示当前端口转发
-3) 删除端口转发
-4) 清空全部规则
-5) 退出
-```
+- 纯 Shell 实现，不依赖 Python、Node.js 等运行环境
+- 直接运行脚本即可进入中文菜单
+- 支持添加、查看、删除端口转发规则
+- 支持 TCP 和 UDP
+- 自动检测 `nftables`，未安装时会尝试自动安装
+- 适合 Debian / Ubuntu 服务器快速配置端口转发
 
-## 功能
+## 快速使用
 
-- 交互式菜单操作
-- 自动检测 nftables；如果没有安装，会尝试自动执行 `apt update -y` 和 `apt install nftables -y`
-- 添加 TCP / UDP 端口转发
-- 显示当前端口转发信息
-- 删除指定端口转发
-- 清空本脚本创建的全部规则
-- 同时保留命令行参数模式，方便脚本化使用
-
-## 一键下载
-
-不用 clone 整个仓库，直接下载脚本即可：
+直接下载单个脚本即可，不需要 clone 整个仓库：
 
 ```bash
 wget https://raw.githubusercontent.com/xihuan0526/nftables/refs/heads/main/nftables-forwarder.sh
@@ -32,38 +21,84 @@ chmod +x nftables-forwarder.sh
 sudo ./nftables-forwarder.sh
 ```
 
-如果系统没有安装 nftables，脚本会在需要使用 nftables 时自动尝试安装：
+运行后会看到菜单：
+
+```text
+========================================
+ nftables 端口转发管理工具
+========================================
+1) 添加端口转发
+2) 显示当前端口转发
+3) 删除端口转发
+4) 清空全部规则
+5) 退出
+========================================
+请选择功能 [1-5]:
+```
+
+## 自动安装 nftables
+
+脚本会先检测系统里有没有 `nft` 命令。
+
+如果已经安装 `nftables`，脚本会直接使用，不会重复安装。
+
+如果没有安装，并且系统支持 `apt` 或 `apt-get`，脚本会自动执行：
 
 ```bash
 apt update -y
 apt install nftables -y
 ```
 
-> 自动安装依赖需要 root 权限，所以推荐用 `sudo ./nftables-forwarder.sh` 运行。
-
-## 交互式使用
-
-直接运行：
+所以建议使用 root 权限运行：
 
 ```bash
 sudo ./nftables-forwarder.sh
 ```
 
-然后根据菜单选择：
+如果你的系统不是 Debian / Ubuntu，例如 CentOS、AlmaLinux、Rocky Linux、Arch Linux，需要先自己安装 `nftables`。
+
+## 菜单功能说明
+
+### 1. 添加端口转发
+
+用于创建新的端口转发规则。
+
+示例：
 
 ```text
-1) 添加端口转发
-2) 显示当前端口转发
-3) 删除端口转发
-4) 清空全部规则
-5) 退出
+本机 8080/tcp -> 10.0.0.2:80
 ```
 
-## 命令行使用
+意思是访问本机 `8080` 端口时，流量会转发到 `10.0.0.2:80`。
 
-### 添加端口转发
+### 2. 显示当前端口转发
 
-格式：
+显示两部分内容：
+
+- 本脚本记录的端口转发规则
+- 当前系统里的 `nftables` 规则
+
+### 3. 删除端口转发
+
+按协议和监听端口删除规则。
+
+例如删除：
+
+```text
+tcp 8080
+```
+
+### 4. 清空全部规则
+
+删除本脚本创建的整个 `inet portfw` 表，并清空本地记录文件。
+
+注意：不要把其它手写规则放进 `inet portfw`，否则清空时会一起删除。
+
+## 命令行用法
+
+除了菜单模式，也可以直接用命令行参数。
+
+### 添加规则
 
 ```bash
 sudo ./nftables-forwarder.sh add <协议> <监听端口> <目标IP> <目标端口> [网卡]
@@ -75,10 +110,10 @@ sudo ./nftables-forwarder.sh add <协议> <监听端口> <目标IP> <目标端�
 sudo ./nftables-forwarder.sh add tcp 8080 10.0.0.2 80 eth0
 ```
 
-意思是：
+不指定网卡也可以：
 
-```text
-本机 eth0 的 8080/tcp -> 10.0.0.2:80
+```bash
+sudo ./nftables-forwarder.sh add tcp 8080 10.0.0.2 80
 ```
 
 UDP 示例：
@@ -87,27 +122,21 @@ UDP 示例：
 sudo ./nftables-forwarder.sh add udp 5353 10.0.0.3 53 eth0
 ```
 
-不限制网卡：
-
-```bash
-sudo ./nftables-forwarder.sh add tcp 8080 10.0.0.2 80
-```
-
-### 显示当前端口转发
+### 查看规则
 
 ```bash
 sudo ./nftables-forwarder.sh list
 ```
 
-或：
+也可以使用：
 
 ```bash
 sudo ./nftables-forwarder.sh show
 ```
 
-### 删除端口转发
+### 删除规则
 
-按协议 + 监听端口删除：
+按协议和监听端口删除：
 
 ```bash
 sudo ./nftables-forwarder.sh delete tcp 8080
@@ -119,51 +148,59 @@ sudo ./nftables-forwarder.sh delete tcp 8080
 sudo ./nftables-forwarder.sh delete tcp 8080 10.0.0.2 80
 ```
 
-简写：
+也可以使用简写：
 
 ```bash
 sudo ./nftables-forwarder.sh rm tcp 8080
 ```
 
-### 清空全部规则
+### 清空规则
 
 ```bash
 sudo ./nftables-forwarder.sh flush
 ```
 
-这会删除：
+或：
 
-- `inet portfw` 表
-- 本地记录文件 `/var/lib/nftables-forwarder/rules.tsv`
+```bash
+sudo ./nftables-forwarder.sh clear
+```
 
-## 本脚本创建了什么
+## 脚本会改动什么
 
-默认管理这个 nftables table：
+脚本会创建并管理这个 nftables 表：
 
 ```text
 inet portfw
 ```
 
-内部包含：
+里面包含两个 chain：
 
-- `prerouting`：DNAT 转发规则
-- `forward`：放行转发流量
+- `prerouting`：用于 DNAT 端口转发
+- `forward`：用于放行转发流量
 
-本地记录文件：
+脚本还会保存一份本地记录，方便显示和删除规则：
 
 ```text
 /var/lib/nftables-forwarder/rules.tsv
 ```
 
+添加规则时，脚本会启用 IPv4 转发：
+
+```bash
+sysctl -w net.ipv4.ip_forward=1
+```
+
 ## 注意事项
 
-- 需要 Linux。
-- Debian / Ubuntu 系统未安装 nftables 时，脚本会尝试用 apt 自动安装。
-- 添加/删除/清空规则通常需要 root 权限。
-- 本工具管理的 table 是 `inet portfw`。
-- 不要把其它手写 nftables 规则放进 `inet portfw`，因为 `flush` 会删除整个表。
-- 如果转发到内网机器，目标机器的回程路由/网关也要正确，否则连接可能回不来。
-- 脚本会在添加规则时执行 `sysctl -w net.ipv4.ip_forward=1`。
+- 本脚本需要 Linux 系统。
+- 添加、删除、清空规则通常需要 root 权限。
+- Debian / Ubuntu 可以自动安装 `nftables`。
+- 其它发行版需要手动安装 `nftables`。
+- 本脚本只管理 `inet portfw` 表。
+- 不要把其它 nftables 规则写进 `inet portfw`。
+- 如果转发到内网机器，目标机器的网关和回程路由也要正确，否则连接可能无法返回。
+- 脚本修改的是当前运行中的 nftables 规则；如果系统重启后规则丢失，需要重新运行脚本添加。
 
 ## 测试
 
