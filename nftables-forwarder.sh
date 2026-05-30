@@ -222,40 +222,34 @@ ensure_state_file() {
 
 migrate_state_file() {
   [[ -s "$STATE_FILE" ]] || return 0
-  local tmp
-  tmp="$(mktemp)"
-  while IFS=$'\t' read -r saved_proto saved_listen saved_target_ip saved_target_port field5 field6 field7 field8 rest; do
-    [[ -n "${saved_proto:-}" ]] || continue
+  awk -F '\t' 'BEGIN{OFS="\t"}
+    NF {
+      proto=$1; listen=$2; target_ip=$3; target_port=$4;
+      iface=""; nat=""; filter=""; post="";
 
-    local iface nat_rule filter_rule post_rule
-    if [[ "${field8:-}" == *"masquerade"* ]]; then
-      # Current format: proto, listen, target_ip, target_port, iface, nat, filter, post
-      iface="${field5:-}"
-      nat_rule="${field6:-}"
-      filter_rule="${field7:-}"
-      post_rule="${field8:-}"
-    else
-      # Old 7-column format: proto, listen, target_ip, target_port, iface, nat, filter
-      # Very old broken rows may miss iface; reconstruct rules defensively.
-      iface="${field5:-}"
-      nat_rule="${field6:-}"
-      filter_rule="${field7:-}"
-      post_rule="ip daddr ${saved_target_ip} masquerade"
-    fi
+      if (NF >= 8 && $8 ~ /masquerade/) {
+        iface=$5; nat=$6; filter=$7; post=$8;
+      } else if (NF >= 7) {
+        iface=$5; nat=$6; filter=$7; post="ip daddr " target_ip " masquerade";
+      } else {
+        iface="";
+      }
 
-    if [[ -z "$filter_rule" || "$filter_rule" == *"masquerade"* ]]; then
-      iface=""
-      nat_rule="${saved_proto} dport ${saved_listen} dnat ip to ${saved_target_ip}:${saved_target_port}"
-      filter_rule="ip daddr ${saved_target_ip} ${saved_proto} dport ${saved_target_port} accept"
-      post_rule="ip daddr ${saved_target_ip} masquerade"
-    elif [[ "$nat_rule" != *" dport "* || "$nat_rule" != *" dnat "* ]]; then
-      iface=""
-      nat_rule="${saved_proto} dport ${saved_listen} dnat ip to ${saved_target_ip}:${saved_target_port}"
-    fi
+      if (filter == "" || filter ~ /masquerade/) {
+        iface="";
+        nat=proto " dport " listen " dnat ip to " target_ip ":" target_port;
+        filter="ip daddr " target_ip " " proto " dport " target_port " accept";
+        post="ip daddr " target_ip " masquerade";
+      } else if (nat !~ / dport / || nat !~ / dnat /) {
+        iface="";
+        nat=proto " dport " listen " dnat ip to " target_ip ":" target_port;
+      }
 
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$saved_proto" "$saved_listen" "$saved_target_ip" "$saved_target_port" "$iface" "$nat_rule" "$filter_rule" "$post_rule" >> "$tmp"
-  done < "$STATE_FILE"
-  mv "$tmp" "$STATE_FILE"
+      if (iface == "") iface="-";
+      print proto, listen, target_ip, target_port, iface, nat, filter, post;
+    }
+  ' "$STATE_FILE" > "$STATE_FILE.tmp"
+  mv "$STATE_FILE.tmp" "$STATE_FILE"
 }
 
 rule_key_matches() {
@@ -283,7 +277,7 @@ add_nft_rule_if_missing() {
 add_one_rule() {
   local proto="$1" listen_port="$2" target_ip="$3" target_port="$4" iface="$5" iface_expr=""
 
-  if [[ -n "$iface" ]]; then
+  if [[ -n "$iface" && "$iface" != "-" ]]; then
     iface_expr="iifname \"$iface\" "
   fi
 
@@ -294,6 +288,8 @@ add_one_rule() {
   if awk -F '\t' -v p="$proto" -v lp="$listen_port" -v ip="$target_ip" -v tp="$target_port" \
     '$1==p && $2==lp && $3==ip && $4==tp {found=1} END{exit !found}' "$STATE_FILE"; then
     echo "已存在：${proto} ${listen_port} -> ${target_ip}:${target_port}"
+    add_nft_rule_if_missing "$CHAIN_PREROUTING" "$nat_rule"
+    add_nft_rule_if_missing "$CHAIN_FORWARD" "$filter_rule"
     add_nft_rule_if_missing "$CHAIN_POSTROUTING" "$post_rule"
     return 0
   fi
@@ -302,7 +298,9 @@ add_one_rule() {
   add_nft_rule_if_missing "$CHAIN_FORWARD" "$filter_rule"
   add_nft_rule_if_missing "$CHAIN_POSTROUTING" "$post_rule"
 
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$proto" "$listen_port" "$target_ip" "$target_port" "$iface" "$nat_rule" "$filter_rule" "$post_rule" >> "$STATE_FILE"
+  local saved_iface="${iface:-}"
+  [[ -n "$saved_iface" ]] || saved_iface="-"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$proto" "$listen_port" "$target_ip" "$target_port" "$saved_iface" "$nat_rule" "$filter_rule" "$post_rule" >> "$STATE_FILE"
   echo "已添加：${proto} ${listen_port} -> ${target_ip}:${target_port}${iface:+ via $iface}，已启用 masquerade"
 }
 
@@ -337,7 +335,7 @@ list_rules() {
     printf '%-4s %-6s %-12s %-22s %-10s %-12s\n' "编号" "协议" "监听端口" "目标" "网卡" "SNAT"
     awk -F '\t' '
       NF {
-        iface = ($5 == "" ? "-" : $5)
+        iface = ($5 == "" || $5 == "-" ? "-" : $5)
         snat = ($8 == "" ? "-" : "masquerade")
         printf "%-4d %-6s %-12s %-22s %-10s %-12s\n", ++idx, $1, $2, $3 ":" $4, iface, snat
       }
@@ -440,12 +438,11 @@ delete_rule_by_number() {
       deleted_post="${saved_post:-ip daddr ${saved_target_ip} masquerade}"
       deleted=1
     else
-      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$saved_proto" "$saved_listen" "$saved_target_ip" "$saved_target_port" "$saved_iface" "$saved_nat" "$saved_filter" "${saved_post:-ip daddr ${saved_target_ip} masquerade}" >> "$tmp"
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$saved_proto" "$saved_listen" "$saved_target_ip" "$saved_target_port" "${saved_iface:--}" "$saved_nat" "$saved_filter" "${saved_post:-ip daddr ${saved_target_ip} masquerade}" >> "$tmp"
     fi
   done < "$STATE_FILE"
 
   delete_unused_post_rule "$deleted_post" "$tmp"
-  reconcile_backend_rules "$tmp"
   mv "$tmp" "$STATE_FILE"
   [[ "$deleted" -eq 1 ]] || echo "未找到编号：$number"
 }
@@ -485,7 +482,6 @@ delete_rule_by_fields() {
     [[ -n "$post_rule" ]] && delete_unused_post_rule "$post_rule" "$tmp"
   done <<< "$deleted_posts"
 
-  reconcile_backend_rules "$tmp"
   mv "$tmp" "$STATE_FILE"
   if [[ "$deleted" -eq 0 ]]; then
     echo "未找到匹配规则。"
@@ -502,6 +498,22 @@ delete_rule() {
   else
     delete_rule_by_fields "$@"
   fi
+}
+
+clean_orphan_rules() {
+  need_root_for_write
+  ensure_nftables
+  [[ -f "$STATE_FILE" ]] && migrate_state_file
+  local tmp
+  tmp="$(mktemp)"
+  if [[ -f "$STATE_FILE" ]]; then
+    cp "$STATE_FILE" "$tmp"
+  else
+    : > "$tmp"
+  fi
+  reconcile_backend_rules "$tmp"
+  rm -f "$tmp"
+  echo "已清理不在本脚本记录里的底层 nftables 残留规则。"
 }
 
 flush_rules() {
@@ -523,6 +535,7 @@ main() {
     add) add_rule "$@" ;;
     list|show) list_rules "$@" ;;
     delete|del|remove|rm) delete_rule "$@" ;;
+    clean|repair) clean_orphan_rules "$@" ;;
     flush|clear) flush_rules "$@" ;;
     menu) interactive_menu ;;
     -h|--help|help) usage ;;
