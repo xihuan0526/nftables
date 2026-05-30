@@ -357,6 +357,40 @@ delete_matching_nft_rule() {
   done <<< "$handles"
 }
 
+rule_exists_in_state_file() {
+  local tmp_file="$1" chain="$2" rule="$3"
+  [[ -s "$tmp_file" ]] || return 1
+  case "$chain" in
+    "$CHAIN_PREROUTING") awk -F '\t' -v rule="$rule" '$6==rule {found=1} END{exit !found}' "$tmp_file" ;;
+    "$CHAIN_FORWARD") awk -F '\t' -v rule="$rule" '$7==rule {found=1} END{exit !found}' "$tmp_file" ;;
+    "$CHAIN_POSTROUTING") awk -F '\t' -v rule="$rule" '$8==rule {found=1} END{exit !found}' "$tmp_file" ;;
+    *) return 1 ;;
+  esac
+}
+
+delete_orphan_backend_rules() {
+  local tmp_file="$1" chain="$2" rule="$3"
+  [[ -n "$rule" ]] || return 0
+  if ! rule_exists_in_state_file "$tmp_file" "$chain" "$rule"; then
+    delete_matching_nft_rule "$chain" "$rule"
+  fi
+}
+
+reconcile_backend_rules() {
+  local tmp_file="$1"
+  local output line rule
+  for chain in "$CHAIN_PREROUTING" "$CHAIN_FORWARD"; do
+    output="$(nft --handle list chain inet "$TABLE" "$chain" 2>/dev/null || true)"
+    while IFS= read -r line; do
+      [[ "$line" == *" handle "* ]] || continue
+      rule="${line%% # handle *}"
+      rule="${rule#${rule%%[![:space:]]*}}"
+      [[ -n "$rule" ]] || continue
+      delete_orphan_backend_rules "$tmp_file" "$chain" "$rule"
+    done <<< "$output"
+  done
+}
+
 post_rule_still_used() {
   local post_rule="$1" tmp_file="$2"
   [[ -s "$tmp_file" ]] || return 1
@@ -411,6 +445,7 @@ delete_rule_by_number() {
   done < "$STATE_FILE"
 
   delete_unused_post_rule "$deleted_post" "$tmp"
+  reconcile_backend_rules "$tmp"
   mv "$tmp" "$STATE_FILE"
   [[ "$deleted" -eq 1 ]] || echo "未找到编号：$number"
 }
@@ -450,6 +485,7 @@ delete_rule_by_fields() {
     [[ -n "$post_rule" ]] && delete_unused_post_rule "$post_rule" "$tmp"
   done <<< "$deleted_posts"
 
+  reconcile_backend_rules "$tmp"
   mv "$tmp" "$STATE_FILE"
   if [[ "$deleted" -eq 0 ]]; then
     echo "未找到匹配规则。"
