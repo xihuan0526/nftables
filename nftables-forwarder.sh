@@ -23,13 +23,21 @@ nftables-forwarder.sh - nftables 端口转发管理脚本
 命令行用法：
   sudo ./nftables-forwarder.sh add <协议> <监听端口> <目标IP> <目标端口> [网卡]
   sudo ./nftables-forwarder.sh list
+  sudo ./nftables-forwarder.sh delete <编号>
   sudo ./nftables-forwarder.sh delete <协议> <监听端口> [目标IP] [目标端口]
   sudo ./nftables-forwarder.sh flush
 
+协议：
+  both    同时添加 TCP 和 UDP，默认值
+  tcp     只添加 TCP
+  udp     只添加 UDP
+
 示例：
+  sudo ./nftables-forwarder.sh add both 8080 10.0.0.2 80 eth0
   sudo ./nftables-forwarder.sh add tcp 8080 10.0.0.2 80 eth0
   sudo ./nftables-forwarder.sh add udp 5353 10.0.0.3 53
   sudo ./nftables-forwarder.sh list
+  sudo ./nftables-forwarder.sh delete 2
   sudo ./nftables-forwarder.sh delete tcp 8080
   sudo ./nftables-forwarder.sh flush
 
@@ -75,8 +83,8 @@ interactive_menu() {
 prompt_add_rule() {
   echo
   echo "添加端口转发"
-  read -r -p "协议 tcp/udp [tcp]: " proto
-  proto="${proto:-tcp}"
+  read -r -p "协议 both/tcp/udp [both]: " proto
+  proto="${proto:-both}"
   read -r -p "监听端口，例如 8080: " listen_port
   read -r -p "目标 IP，例如 10.0.0.2: " target_ip
   read -r -p "目标端口，例如 80: " target_port
@@ -87,8 +95,14 @@ prompt_add_rule() {
 prompt_delete_rule() {
   echo
   echo "删除端口转发"
-  read -r -p "协议 tcp/udp [tcp]: " proto
-  proto="${proto:-tcp}"
+  list_rules
+  echo
+  read -r -p "请输入要删除的编号，或留空后按协议/端口删除: " rule_id
+  if [[ -n "$rule_id" ]]; then
+    delete_rule "$rule_id"
+    return 0
+  fi
+  read -r -p "协议 tcp/udp: " proto
   read -r -p "监听端口，例如 8080: " listen_port
   read -r -p "目标 IP，可留空: " target_ip
   read -r -p "目标端口，可留空: " target_port
@@ -148,8 +162,23 @@ need_root_for_write() {
 
 validate_proto() {
   case "$1" in
+    tcp|udp|both) ;;
+    *) echo "错误：协议只能是 both、tcp 或 udp。" >&2; exit 1 ;;
+  esac
+}
+
+validate_single_proto() {
+  case "$1" in
     tcp|udp) ;;
-    *) echo "错误：协议只能是 tcp 或 udp。" >&2; exit 1 ;;
+    *) echo "错误：删除单条规则时协议只能是 tcp 或 udp。" >&2; exit 1 ;;
+  esac
+}
+
+expand_proto() {
+  case "$1" in
+    both) printf 'tcp\nudp\n' ;;
+    tcp|udp) printf '%s\n' "$1" ;;
+    *) echo "错误：协议只能是 both、tcp 或 udp。" >&2; exit 1 ;;
   esac
 }
 
@@ -191,22 +220,14 @@ rule_key_matches() {
   return 0
 }
 
-add_rule() {
-  need_root_for_write
-  ensure_nftables
-  need_cmd sysctl
+line_by_number() {
+  local number="$1"
+  awk -v n="$number" 'NF && ++idx == n {print; found=1; exit} END{exit !found}' "$STATE_FILE"
+}
 
-  local proto="${1:-}" listen_port="${2:-}" target_ip="${3:-}" target_port="${4:-}" iface="${5:-}"
-  [[ -n "$proto" && -n "$listen_port" && -n "$target_ip" && -n "$target_port" ]] || { usage; exit 1; }
-  validate_proto "$proto"
-  validate_port "$listen_port" "监听端口"
-  validate_port "$target_port" "目标端口"
+add_one_rule() {
+  local proto="$1" listen_port="$2" target_ip="$3" target_port="$4" iface="$5" iface_expr=""
 
-  ensure_table
-  enable_forwarding
-  ensure_state_file
-
-  local iface_expr=""
   if [[ -n "$iface" ]]; then
     iface_expr="iifname \"$iface\" "
   fi
@@ -227,33 +248,91 @@ add_rule() {
   echo "已添加：${proto} ${listen_port} -> ${target_ip}:${target_port}${iface:+ via $iface}"
 }
 
-list_rules() {
-  ensure_nftables
-  echo "nftables table: inet $TABLE"
-  echo
-
-  if [[ -f "$STATE_FILE" && -s "$STATE_FILE" ]]; then
-    echo "本脚本记录的端口转发："
-    printf '%-6s %-12s %-22s %-10s\n' "协议" "监听端口" "目标" "网卡"
-    while IFS=$'\t' read -r proto listen_port target_ip target_port iface nat_rule filter_rule; do
-      printf '%-6s %-12s %-22s %-10s\n' "$proto" "$listen_port" "${target_ip}:${target_port}" "${iface:--}"
-    done < "$STATE_FILE"
-  else
-    echo "本脚本暂无记录。"
-  fi
-
-  echo
-  echo "当前 nftables 规则："
-  nft list table inet "$TABLE" 2>/dev/null || echo "inet $TABLE 不存在。"
-}
-
-delete_rule() {
+add_rule() {
   need_root_for_write
   ensure_nftables
+  need_cmd sysctl
 
-  local proto="${1:-}" listen_port="${2:-}" target_ip="${3:-}" target_port="${4:-}"
-  [[ -n "$proto" && -n "$listen_port" ]] || { usage; exit 1; }
+  local proto="${1:-both}" listen_port="${2:-}" target_ip="${3:-}" target_port="${4:-}" iface="${5:-}"
+  [[ -n "$proto" && -n "$listen_port" && -n "$target_ip" && -n "$target_port" ]] || { usage; exit 1; }
   validate_proto "$proto"
+  validate_port "$listen_port" "监听端口"
+  validate_port "$target_port" "目标端口"
+
+  ensure_table
+  enable_forwarding
+  ensure_state_file
+
+  local p
+  while IFS= read -r p; do
+    add_one_rule "$p" "$listen_port" "$target_ip" "$target_port" "$iface"
+  done < <(expand_proto "$proto")
+}
+
+list_rules() {
+  ensure_nftables
+
+  if [[ -f "$STATE_FILE" && -s "$STATE_FILE" ]]; then
+    echo "当前端口转发："
+    printf '%-4s %-6s %-12s %-22s %-10s\n' "编号" "协议" "监听端口" "目标" "网卡"
+    awk -F '\t' '
+      NF {
+        iface = ($5 == "" ? "-" : $5)
+        printf "%-4d %-6s %-12s %-22s %-10s\n", ++idx, $1, $2, $3 ":" $4, iface
+      }
+    ' "$STATE_FILE"
+  else
+    echo "本脚本暂无端口转发记录。"
+  fi
+}
+
+delete_saved_rule() {
+  local saved_proto="$1" saved_listen="$2" saved_target_ip="$3" saved_target_port="$4" saved_nat="$5" saved_filter="$6"
+
+  nft --handle list chain inet "$TABLE" "$CHAIN_PREROUTING" | awk -v pat="$saved_nat" '$0 ~ pat {print $NF}' | while read -r handle; do
+    [[ -n "$handle" ]] && nft delete rule inet "$TABLE" "$CHAIN_PREROUTING" handle "$handle" || true
+  done
+  nft --handle list chain inet "$TABLE" "$CHAIN_FORWARD" | awk -v pat="$saved_filter" '$0 ~ pat {print $NF}' | while read -r handle; do
+    [[ -n "$handle" ]] && nft delete rule inet "$TABLE" "$CHAIN_FORWARD" handle "$handle" || true
+  done
+  echo "已删除：${saved_proto} ${saved_listen} -> ${saved_target_ip}:${saved_target_port}"
+}
+
+delete_rule_by_number() {
+  local number="$1"
+  validate_port "$number" "编号"
+
+  if [[ ! -f "$STATE_FILE" || ! -s "$STATE_FILE" ]]; then
+    echo "没有可删除的记录。"
+    return 0
+  fi
+
+  local line tmp deleted=0 idx=0
+  line="$(line_by_number "$number" || true)"
+  if [[ -z "$line" ]]; then
+    echo "未找到编号：$number"
+    return 0
+  fi
+
+  tmp="$(mktemp)"
+  while IFS=$'\t' read -r saved_proto saved_listen saved_target_ip saved_target_port saved_iface saved_nat saved_filter; do
+    idx=$((idx + 1))
+    if [[ "$idx" -eq "$number" ]]; then
+      delete_saved_rule "$saved_proto" "$saved_listen" "$saved_target_ip" "$saved_target_port" "$saved_nat" "$saved_filter"
+      deleted=1
+    else
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$saved_proto" "$saved_listen" "$saved_target_ip" "$saved_target_port" "$saved_iface" "$saved_nat" "$saved_filter" >> "$tmp"
+    fi
+  done < "$STATE_FILE"
+
+  mv "$tmp" "$STATE_FILE"
+  [[ "$deleted" -eq 1 ]] || echo "未找到编号：$number"
+}
+
+delete_rule_by_fields() {
+  local proto="$1" listen_port="$2" target_ip="${3:-}" target_port="${4:-}"
+  [[ -n "$proto" && -n "$listen_port" ]] || { usage; exit 1; }
+  validate_single_proto "$proto"
   validate_port "$listen_port" "监听端口"
   [[ -z "$target_port" ]] || validate_port "$target_port" "目标端口"
 
@@ -270,13 +349,7 @@ delete_rule() {
     local line
     line=$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s' "$saved_proto" "$saved_listen" "$saved_target_ip" "$saved_target_port" "$saved_iface" "$saved_nat" "$saved_filter")
     if rule_key_matches "$line" "$proto" "$listen_port" "$target_ip" "$target_port"; then
-      nft --handle list chain inet "$TABLE" "$CHAIN_PREROUTING" | awk -v pat="$saved_nat" '$0 ~ pat {print $NF}' | while read -r handle; do
-        [[ -n "$handle" ]] && nft delete rule inet "$TABLE" "$CHAIN_PREROUTING" handle "$handle" || true
-      done
-      nft --handle list chain inet "$TABLE" "$CHAIN_FORWARD" | awk -v pat="$saved_filter" '$0 ~ pat {print $NF}' | while read -r handle; do
-        [[ -n "$handle" ]] && nft delete rule inet "$TABLE" "$CHAIN_FORWARD" handle "$handle" || true
-      done
-      echo "已删除：${saved_proto} ${saved_listen} -> ${saved_target_ip}:${saved_target_port}"
+      delete_saved_rule "$saved_proto" "$saved_listen" "$saved_target_ip" "$saved_target_port" "$saved_nat" "$saved_filter"
       deleted=1
     else
       printf '%s\n' "$line" >> "$tmp"
@@ -286,6 +359,17 @@ delete_rule() {
   mv "$tmp" "$STATE_FILE"
   if [[ "$deleted" -eq 0 ]]; then
     echo "未找到匹配规则。"
+  fi
+}
+
+delete_rule() {
+  need_root_for_write
+  ensure_nftables
+
+  if [[ "${1:-}" =~ ^[0-9]+$ && $# -eq 1 ]]; then
+    delete_rule_by_number "$1"
+  else
+    delete_rule_by_fields "$@"
   fi
 }
 

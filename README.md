@@ -6,8 +6,9 @@
 
 - 纯 Shell 实现，不依赖 Python、Node.js 等运行环境
 - 直接运行脚本即可进入中文菜单
-- 支持添加、查看、删除端口转发规则
-- 支持 TCP 和 UDP
+- 支持添加、查看、按编号删除端口转发规则
+- 默认同时添加 TCP 和 UDP，也可以单独添加 TCP 或 UDP
+- 查看规则时只显示脚本记录的端口转发清单，不展示底层 nftables 规则
 - 自动检测 `nftables`，未安装时会尝试自动安装
 - 适合 Debian / Ubuntu 服务器快速配置端口转发
 
@@ -63,29 +64,41 @@ sudo ./nftables-forwarder.sh
 
 用于创建新的端口转发规则。
 
+默认会同时添加 TCP 和 UDP。
+
 示例：
 
 ```text
-本机 8080/tcp -> 10.0.0.2:80
+本机 8080/tcp+udp -> 10.0.0.2:80
 ```
 
-意思是访问本机 `8080` 端口时，流量会转发到 `10.0.0.2:80`。
+意思是访问本机 `8080` 端口时，TCP 和 UDP 流量都会转发到 `10.0.0.2:80`。
 
 ### 2. 显示当前端口转发
 
-显示两部分内容：
-
-- 本脚本记录的端口转发规则
-- 当前系统里的 `nftables` 规则
+只显示本脚本记录的端口转发清单，并带有编号，方便删除时选择。
 
 ### 3. 删除端口转发
 
-按协议和监听端口删除规则。
+优先按编号删除规则。
 
-例如删除：
+例如列表里显示：
 
 ```text
-tcp 8080
+编号 协议   监听端口     目标
+2    udp    8080         10.0.0.2:80
+```
+
+删除编号 `2`：
+
+```bash
+sudo ./nftables-forwarder.sh delete 2
+```
+
+也保留按协议和监听端口删除的方式：
+
+```bash
+sudo ./nftables-forwarder.sh delete tcp 8080
 ```
 
 ### 4. 清空全部规则
@@ -104,16 +117,22 @@ tcp 8080
 sudo ./nftables-forwarder.sh add <协议> <监听端口> <目标IP> <目标端口> [网卡]
 ```
 
+协议可以是：
+
+- `both`：同时添加 TCP 和 UDP，默认推荐
+- `tcp`：只添加 TCP
+- `udp`：只添加 UDP
+
 示例：
 
 ```bash
-sudo ./nftables-forwarder.sh add tcp 8080 10.0.0.2 80 eth0
+sudo ./nftables-forwarder.sh add both 8080 10.0.0.2 80 eth0
 ```
 
 不指定网卡也可以：
 
 ```bash
-sudo ./nftables-forwarder.sh add tcp 8080 10.0.0.2 80
+sudo ./nftables-forwarder.sh add both 8080 10.0.0.2 80
 ```
 
 UDP 示例：
@@ -136,7 +155,19 @@ sudo ./nftables-forwarder.sh show
 
 ### 删除规则
 
-按协议和监听端口删除：
+推荐先查看编号：
+
+```bash
+sudo ./nftables-forwarder.sh list
+```
+
+然后按编号删除：
+
+```bash
+sudo ./nftables-forwarder.sh delete 2
+```
+
+也可以按协议和监听端口删除：
 
 ```bash
 sudo ./nftables-forwarder.sh delete tcp 8080
