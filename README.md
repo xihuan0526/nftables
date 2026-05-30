@@ -9,6 +9,7 @@
 - 支持添加、查看、按编号删除端口转发规则
 - 默认同时添加 TCP 和 UDP，也可以单独添加 TCP 或 UDP
 - 查看规则时只显示脚本记录的端口转发清单，不展示底层 nftables 规则
+- 自动添加 `masquerade`，目标是内网 IP 或外网 IP 时都更容易正常回包
 - 自动检测 `nftables`，未安装时会尝试自动安装
 - 适合 Debian / Ubuntu 服务器快速配置端口转发
 
@@ -73,6 +74,8 @@ sudo ./nftables-forwarder.sh
 ```
 
 意思是访问本机 `8080` 端口时，TCP 和 UDP 流量都会转发到 `10.0.0.2:80`。
+
+脚本会同时添加 `masquerade` 回包规则。这样目标可以是内网 IP，也可以是只允许本机公网 IP 访问的外网 IP。目标服务器看到的来源 IP 会是本机/转发机 IP。
 
 ### 2. 显示当前端口转发
 
@@ -200,15 +203,15 @@ sudo ./nftables-forwarder.sh clear
 ## 脚本会改动什么
 
 脚本会创建并管理这个 nftables 表：
-
 ```text
 inet portfw
 ```
 
-里面包含两个 chain：
+里面包含三个 chain：
 
 - `prerouting`：用于 DNAT 端口转发
 - `forward`：用于放行转发流量
+- `postrouting`：用于 `masquerade`，保证目标机器能把回包返回给本机/转发机
 
 脚本还会保存一份本地记录，方便显示和删除规则：
 
@@ -230,7 +233,8 @@ sysctl -w net.ipv4.ip_forward=1
 - 其它发行版需要手动安装 `nftables`。
 - 本脚本只管理 `inet portfw` 表。
 - 不要把其它 nftables 规则写进 `inet portfw`。
-- 如果转发到内网机器，目标机器的网关和回程路由也要正确，否则连接可能无法返回。
+- 如果目标是外网 IP，并且对方防火墙只允许本机公网 IP 访问，`masquerade` 是必须的。
+- 因为开启了 `masquerade`，目标服务器看到的来源 IP 会是本机/转发机 IP，不是原始客户端 IP。
 - 脚本修改的是当前运行中的 nftables 规则；如果系统重启后规则丢失，需要重新运行脚本添加。
 
 ## 测试

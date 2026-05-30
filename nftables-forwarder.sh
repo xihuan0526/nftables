@@ -4,6 +4,7 @@ set -euo pipefail
 TABLE="portfw"
 CHAIN_PREROUTING="prerouting"
 CHAIN_FORWARD="forward"
+CHAIN_POSTROUTING="postrouting"
 STATE_FILE="/var/lib/nftables-forwarder/rules.tsv"
 
 usage() {
@@ -40,6 +41,11 @@ nftables-forwarder.sh - nftables 端口转发管理脚本
   sudo ./nftables-forwarder.sh delete 2
   sudo ./nftables-forwarder.sh delete tcp 8080
   sudo ./nftables-forwarder.sh flush
+
+说明：
+  - 添加规则时会同时创建 DNAT 和 MASQUERADE。
+  - 这样目标是内网 IP 或外网 IP 时，一般都能正常回包。
+  - 目标服务器看到的来源 IP 会是本机/转发机 IP，而不是原始客户端 IP。
 
 注意：
   - 需要 Linux + nftables；如果系统未安装 nftables，脚本会尝试用 apt 自动安装。
@@ -86,7 +92,7 @@ prompt_add_rule() {
   read -r -p "协议 both/tcp/udp [both]: " proto
   proto="${proto:-both}"
   read -r -p "监听端口，例如 8080: " listen_port
-  read -r -p "目标 IP，例如 10.0.0.2: " target_ip
+  read -r -p "目标 IP，例如 10.0.0.2 或 163.223.125.7: " target_ip
   read -r -p "目标端口，例如 80: " target_port
   read -r -p "入站网卡，可留空，例如 eth0: " iface
   add_rule "$proto" "$listen_port" "$target_ip" "$target_port" "$iface"
@@ -192,10 +198,13 @@ validate_port() {
 }
 
 ensure_table() {
-  nft list table inet "$TABLE" >/dev/null 2>&1 && return 0
-  nft add table inet "$TABLE"
-  nft "add chain inet $TABLE $CHAIN_PREROUTING { type nat hook prerouting priority dstnat; policy accept; }"
-  nft "add chain inet $TABLE $CHAIN_FORWARD { type filter hook forward priority filter; policy accept; }"
+  nft list table inet "$TABLE" >/dev/null 2>&1 || nft add table inet "$TABLE"
+  nft list chain inet "$TABLE" "$CHAIN_PREROUTING" >/dev/null 2>&1 || \
+    nft "add chain inet $TABLE $CHAIN_PREROUTING { type nat hook prerouting priority dstnat; policy accept; }"
+  nft list chain inet "$TABLE" "$CHAIN_FORWARD" >/dev/null 2>&1 || \
+    nft "add chain inet $TABLE $CHAIN_FORWARD { type filter hook forward priority filter; policy accept; }"
+  nft list chain inet "$TABLE" "$CHAIN_POSTROUTING" >/dev/null 2>&1 || \
+    nft "add chain inet $TABLE $CHAIN_POSTROUTING { type nat hook postrouting priority srcnat; policy accept; }"
 }
 
 enable_forwarding() {
@@ -209,11 +218,26 @@ state_dir() {
 ensure_state_file() {
   mkdir -p "$(state_dir)"
   touch "$STATE_FILE"
+  migrate_state_file
+}
+
+migrate_state_file() {
+  [[ -s "$STATE_FILE" ]] || return 0
+  local tmp
+  tmp="$(mktemp)"
+  while IFS=$'\t' read -r proto listen_port target_ip target_port iface nat_rule filter_rule post_rule rest; do
+    [[ -n "${proto:-}" ]] || continue
+    if [[ -z "${post_rule:-}" ]]; then
+      post_rule="ip daddr ${target_ip} masquerade"
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$proto" "$listen_port" "$target_ip" "$target_port" "$iface" "$nat_rule" "$filter_rule" "$post_rule" >> "$tmp"
+  done < "$STATE_FILE"
+  mv "$tmp" "$STATE_FILE"
 }
 
 rule_key_matches() {
   local line="$1" proto="$2" listen_port="$3" target_ip="${4:-}" target_port="${5:-}"
-  IFS=$'\t' read -r saved_proto saved_listen saved_target_ip saved_target_port saved_iface saved_nat saved_filter <<<"$line"
+  IFS=$'\t' read -r saved_proto saved_listen saved_target_ip saved_target_port saved_iface saved_nat saved_filter saved_post <<<"$line"
   [[ "$saved_proto" == "$proto" && "$saved_listen" == "$listen_port" ]] || return 1
   [[ -z "$target_ip" || "$saved_target_ip" == "$target_ip" ]] || return 1
   [[ -z "$target_port" || "$saved_target_port" == "$target_port" ]] || return 1
@@ -225,6 +249,14 @@ line_by_number() {
   awk -v n="$number" 'NF && ++idx == n {print; found=1; exit} END{exit !found}' "$STATE_FILE"
 }
 
+add_nft_rule_if_missing() {
+  local chain="$1" rule="$2"
+  if nft list chain inet "$TABLE" "$chain" 2>/dev/null | grep -Fq -- "$rule"; then
+    return 0
+  fi
+  nft add rule inet "$TABLE" "$chain" $rule
+}
+
 add_one_rule() {
   local proto="$1" listen_port="$2" target_ip="$3" target_port="$4" iface="$5" iface_expr=""
 
@@ -234,24 +266,28 @@ add_one_rule() {
 
   local nat_rule="${iface_expr}${proto} dport ${listen_port} dnat ip to ${target_ip}:${target_port}"
   local filter_rule="ip daddr ${target_ip} ${proto} dport ${target_port} accept"
+  local post_rule="ip daddr ${target_ip} masquerade"
 
   if awk -F '\t' -v p="$proto" -v lp="$listen_port" -v ip="$target_ip" -v tp="$target_port" \
     '$1==p && $2==lp && $3==ip && $4==tp {found=1} END{exit !found}' "$STATE_FILE"; then
     echo "已存在：${proto} ${listen_port} -> ${target_ip}:${target_port}"
+    add_nft_rule_if_missing "$CHAIN_POSTROUTING" "$post_rule"
     return 0
   fi
 
-  nft add rule inet "$TABLE" "$CHAIN_PREROUTING" $nat_rule
-  nft add rule inet "$TABLE" "$CHAIN_FORWARD" $filter_rule
+  add_nft_rule_if_missing "$CHAIN_PREROUTING" "$nat_rule"
+  add_nft_rule_if_missing "$CHAIN_FORWARD" "$filter_rule"
+  add_nft_rule_if_missing "$CHAIN_POSTROUTING" "$post_rule"
 
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$proto" "$listen_port" "$target_ip" "$target_port" "$iface" "$nat_rule" "$filter_rule" >> "$STATE_FILE"
-  echo "已添加：${proto} ${listen_port} -> ${target_ip}:${target_port}${iface:+ via $iface}"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$proto" "$listen_port" "$target_ip" "$target_port" "$iface" "$nat_rule" "$filter_rule" "$post_rule" >> "$STATE_FILE"
+  echo "已添加：${proto} ${listen_port} -> ${target_ip}:${target_port}${iface:+ via $iface}，已启用 masquerade"
 }
 
 add_rule() {
   need_root_for_write
   ensure_nftables
   need_cmd sysctl
+  need_cmd grep
 
   local proto="${1:-both}" listen_port="${2:-}" target_ip="${3:-}" target_port="${4:-}" iface="${5:-}"
   [[ -n "$proto" && -n "$listen_port" && -n "$target_ip" && -n "$target_port" ]] || { usage; exit 1; }
@@ -271,14 +307,16 @@ add_rule() {
 
 list_rules() {
   ensure_nftables
+  [[ -f "$STATE_FILE" ]] && migrate_state_file
 
   if [[ -f "$STATE_FILE" && -s "$STATE_FILE" ]]; then
     echo "当前端口转发："
-    printf '%-4s %-6s %-12s %-22s %-10s\n' "编号" "协议" "监听端口" "目标" "网卡"
+    printf '%-4s %-6s %-12s %-22s %-10s %-12s\n' "编号" "协议" "监听端口" "目标" "网卡" "SNAT"
     awk -F '\t' '
       NF {
         iface = ($5 == "" ? "-" : $5)
-        printf "%-4d %-6s %-12s %-22s %-10s\n", ++idx, $1, $2, $3 ":" $4, iface
+        snat = ($8 == "" ? "-" : "masquerade")
+        printf "%-4d %-6s %-12s %-22s %-10s %-12s\n", ++idx, $1, $2, $3 ":" $4, iface, snat
       }
     ' "$STATE_FILE"
   else
@@ -286,16 +324,38 @@ list_rules() {
   fi
 }
 
-delete_saved_rule() {
-  local saved_proto="$1" saved_listen="$2" saved_target_ip="$3" saved_target_port="$4" saved_nat="$5" saved_filter="$6"
+delete_matching_nft_rule() {
+  local chain="$1" rule="$2"
+  nft --handle list chain inet "$TABLE" "$chain" 2>/dev/null | grep -F -- "$rule" | while read -r line; do
+    local handle
+    handle="${line##* handle }"
+    if [[ "$handle" =~ ^[0-9]+$ ]]; then
+      nft delete rule inet "$TABLE" "$chain" handle "$handle" || true
+    fi
+  done
+}
 
-  nft --handle list chain inet "$TABLE" "$CHAIN_PREROUTING" | awk -v pat="$saved_nat" '$0 ~ pat {print $NF}' | while read -r handle; do
-    [[ -n "$handle" ]] && nft delete rule inet "$TABLE" "$CHAIN_PREROUTING" handle "$handle" || true
-  done
-  nft --handle list chain inet "$TABLE" "$CHAIN_FORWARD" | awk -v pat="$saved_filter" '$0 ~ pat {print $NF}' | while read -r handle; do
-    [[ -n "$handle" ]] && nft delete rule inet "$TABLE" "$CHAIN_FORWARD" handle "$handle" || true
-  done
+post_rule_still_used() {
+  local post_rule="$1" tmp_file="$2"
+  [[ -s "$tmp_file" ]] || return 1
+  awk -F '\t' -v rule="$post_rule" '$8==rule {found=1} END{exit !found}' "$tmp_file"
+}
+
+delete_saved_rule() {
+  local saved_proto="$1" saved_listen="$2" saved_target_ip="$3" saved_target_port="$4" saved_nat="$5" saved_filter="$6" saved_post="${7:-}"
+  [[ -n "$saved_post" ]] || saved_post="ip daddr ${saved_target_ip} masquerade"
+
+  delete_matching_nft_rule "$CHAIN_PREROUTING" "$saved_nat"
+  delete_matching_nft_rule "$CHAIN_FORWARD" "$saved_filter"
   echo "已删除：${saved_proto} ${saved_listen} -> ${saved_target_ip}:${saved_target_port}"
+}
+
+delete_unused_post_rule() {
+  local saved_post="$1" tmp_file="$2"
+  [[ -n "$saved_post" ]] || return 0
+  if ! post_rule_still_used "$saved_post" "$tmp_file"; then
+    delete_matching_nft_rule "$CHAIN_POSTROUTING" "$saved_post"
+  fi
 }
 
 delete_rule_by_number() {
@@ -307,7 +367,9 @@ delete_rule_by_number() {
     return 0
   fi
 
-  local line tmp deleted=0 idx=0
+  migrate_state_file
+
+  local line tmp deleted=0 idx=0 deleted_post=""
   line="$(line_by_number "$number" || true)"
   if [[ -z "$line" ]]; then
     echo "未找到编号：$number"
@@ -315,16 +377,18 @@ delete_rule_by_number() {
   fi
 
   tmp="$(mktemp)"
-  while IFS=$'\t' read -r saved_proto saved_listen saved_target_ip saved_target_port saved_iface saved_nat saved_filter; do
+  while IFS=$'\t' read -r saved_proto saved_listen saved_target_ip saved_target_port saved_iface saved_nat saved_filter saved_post; do
     idx=$((idx + 1))
     if [[ "$idx" -eq "$number" ]]; then
-      delete_saved_rule "$saved_proto" "$saved_listen" "$saved_target_ip" "$saved_target_port" "$saved_nat" "$saved_filter"
+      delete_saved_rule "$saved_proto" "$saved_listen" "$saved_target_ip" "$saved_target_port" "$saved_nat" "$saved_filter" "$saved_post"
+      deleted_post="${saved_post:-ip daddr ${saved_target_ip} masquerade}"
       deleted=1
     else
-      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$saved_proto" "$saved_listen" "$saved_target_ip" "$saved_target_port" "$saved_iface" "$saved_nat" "$saved_filter" >> "$tmp"
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$saved_proto" "$saved_listen" "$saved_target_ip" "$saved_target_port" "$saved_iface" "$saved_nat" "$saved_filter" "${saved_post:-ip daddr ${saved_target_ip} masquerade}" >> "$tmp"
     fi
   done < "$STATE_FILE"
 
+  delete_unused_post_rule "$deleted_post" "$tmp"
   mv "$tmp" "$STATE_FILE"
   [[ "$deleted" -eq 1 ]] || echo "未找到编号：$number"
 }
@@ -341,20 +405,28 @@ delete_rule_by_fields() {
     return 0
   fi
 
+  migrate_state_file
+
   local tmp
   tmp="$(mktemp)"
-  local deleted=0
+  local deleted=0 deleted_posts=""
 
-  while IFS=$'\t' read -r saved_proto saved_listen saved_target_ip saved_target_port saved_iface saved_nat saved_filter; do
+  while IFS=$'\t' read -r saved_proto saved_listen saved_target_ip saved_target_port saved_iface saved_nat saved_filter saved_post; do
     local line
-    line=$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s' "$saved_proto" "$saved_listen" "$saved_target_ip" "$saved_target_port" "$saved_iface" "$saved_nat" "$saved_filter")
+    saved_post="${saved_post:-ip daddr ${saved_target_ip} masquerade}"
+    line=$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$saved_proto" "$saved_listen" "$saved_target_ip" "$saved_target_port" "$saved_iface" "$saved_nat" "$saved_filter" "$saved_post")
     if rule_key_matches "$line" "$proto" "$listen_port" "$target_ip" "$target_port"; then
-      delete_saved_rule "$saved_proto" "$saved_listen" "$saved_target_ip" "$saved_target_port" "$saved_nat" "$saved_filter"
+      delete_saved_rule "$saved_proto" "$saved_listen" "$saved_target_ip" "$saved_target_port" "$saved_nat" "$saved_filter" "$saved_post"
+      deleted_posts+="$saved_post"$'\n'
       deleted=1
     else
       printf '%s\n' "$line" >> "$tmp"
     fi
   done < "$STATE_FILE"
+
+  while IFS= read -r post_rule; do
+    [[ -n "$post_rule" ]] && delete_unused_post_rule "$post_rule" "$tmp"
+  done <<< "$deleted_posts"
 
   mv "$tmp" "$STATE_FILE"
   if [[ "$deleted" -eq 0 ]]; then
@@ -365,6 +437,7 @@ delete_rule_by_fields() {
 delete_rule() {
   need_root_for_write
   ensure_nftables
+  need_cmd grep
 
   if [[ "${1:-}" =~ ^[0-9]+$ && $# -eq 1 ]]; then
     delete_rule_by_number "$1"

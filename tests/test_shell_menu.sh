@@ -15,6 +15,7 @@ output="$($script --help)"
 [[ "$output" == *"4) 清空全部规则"* ]] || fail "help should show flush menu option"
 [[ "$output" == *"both    同时添加 TCP 和 UDP"* ]] || fail "help should document both protocol"
 [[ "$output" == *"delete <编号>"* ]] || fail "help should document delete by number"
+[[ "$output" == *"MASQUERADE"* || "$output" == *"masquerade"* ]] || fail "help should document masquerade"
 
 menu_output="$(printf '5\n' | $script)"
 [[ "$menu_output" == *"请选择功能"* ]] || fail "no-arg run should show interactive menu"
@@ -26,5 +27,7 @@ grep -q 'proto="${proto:-both}"' "$script" || fail "interactive add should defau
 grep -q 'printf .*"编号" "协议" "监听端口"' "$script" || fail "list should print rule numbers"
 ! grep -q '当前 nftables 规则' "$script" || fail "list should not print raw nftables rules"
 grep -q 'delete_rule_by_number' "$script" || fail "script should support delete by number"
+grep -q 'CHAIN_POSTROUTING="postrouting"' "$script" || fail "script should define postrouting chain"
+grep -q 'masquerade' "$script" || fail "script should add masquerade rules"
 
 echo "shell menu tests OK"
