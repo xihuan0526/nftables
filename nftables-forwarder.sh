@@ -248,6 +248,9 @@ migrate_state_file() {
       nat_rule="${saved_proto} dport ${saved_listen} dnat ip to ${saved_target_ip}:${saved_target_port}"
       filter_rule="ip daddr ${saved_target_ip} ${saved_proto} dport ${saved_target_port} accept"
       post_rule="ip daddr ${saved_target_ip} masquerade"
+    elif [[ "$nat_rule" != *" dport "* || "$nat_rule" != *" dnat "* ]]; then
+      iface=""
+      nat_rule="${saved_proto} dport ${saved_listen} dnat ip to ${saved_target_ip}:${saved_target_port}"
     fi
 
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$saved_proto" "$saved_listen" "$saved_target_ip" "$saved_target_port" "$iface" "$nat_rule" "$filter_rule" "$post_rule" >> "$tmp"
@@ -346,19 +349,18 @@ list_rules() {
 
 delete_matching_nft_rule() {
   local chain="$1" rule="$2"
-  nft --handle list chain inet "$TABLE" "$chain" 2>/dev/null | grep -F -- "$rule" | while read -r line; do
-    local handle
-    handle="${line##* handle }"
-    if [[ "$handle" =~ ^[0-9]+$ ]]; then
-      nft delete rule inet "$TABLE" "$chain" handle "$handle" || true
-    fi
-  done
+  local output handles handle
+  output="$(nft --handle list chain inet "$TABLE" "$chain" 2>/dev/null || true)"
+  handles="$(printf '%s\n' "$output" | grep -F -- "$rule" | sed -n 's/.* handle \([0-9][0-9]*\).*/\1/p' || true)"
+  while IFS= read -r handle; do
+    [[ -n "$handle" ]] && nft delete rule inet "$TABLE" "$chain" handle "$handle" || true
+  done <<< "$handles"
 }
 
 post_rule_still_used() {
   local post_rule="$1" tmp_file="$2"
   [[ -s "$tmp_file" ]] || return 1
-  awk -F '\t' -v rule="$post_rule" '$8==rule {found=1} END{exit !found}' "$tmp_file"
+  awk -F '\t' -v rule="$post_rule" '{candidate=($8 != "" ? $8 : $7)} candidate==rule {found=1} END{exit !found}' "$tmp_file"
 }
 
 delete_saved_rule() {

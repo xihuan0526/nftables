@@ -34,15 +34,19 @@ grep -q 'masquerade' "$script" || fail "script should add masquerade rules"
 # Regression test: adding two ports in one menu session should not corrupt proto variables.
 tmp="$(mktemp -d)"
 mkdir -p "$tmp/bin"
-cat > "$tmp/bin/nft" <<'SH'
-#!/usr/bin/env bash
-if [[ "$*" == list\ table* ]]; then exit 1; fi
-if [[ "$*" == list\ chain* ]]; then exit 1; fi
-exit 0
-SH
 cat > "$tmp/bin/sysctl" <<'SH'
 #!/usr/bin/env bash
 exit 0
+SH
+cat > "$tmp/bin/nft" <<'SH'
+#!/usr/bin/env bash
+log=${NFT_LOG:-/tmp/nftables-forwarder-test-nft.log}
+printf '%s\n' "$*" >> "$log"
+case "$*" in
+  list\ table*) exit 1 ;;
+  list\ chain*) exit 1 ;;
+  *) exit 0 ;;
+esac
 SH
 chmod +x "$tmp/bin/nft" "$tmp/bin/sysctl"
 rm -rf /var/lib/nftables-forwarder
@@ -65,5 +69,17 @@ EOF
 [[ "$add_twice_output" != *"错误：协议只能是 both、tcp 或 udp"* ]] || fail "adding a second port should not trigger protocol error"
 [[ -f /var/lib/nftables-forwarder/rules.tsv ]] || fail "state file should be created"
 [[ "$(wc -l < /var/lib/nftables-forwarder/rules.tsv)" -eq 4 ]] || fail "two both-rules should create four state rows"
+
+# Regression test: delete by number should update state even when no nft handle matches.
+rm -rf /var/lib/nftables-forwarder
+mkdir -p /var/lib/nftables-forwarder
+cat > /var/lib/nftables-forwarder/rules.tsv <<'EOF'
+tcp	5000	1.1.1.1	5000		tcp dport 5000 dnat ip to 1.1.1.1:5000	ip daddr 1.1.1.1 tcp dport 5000 accept	ip daddr 1.1.1.1 masquerade
+udp	5000	1.1.1.1	5000		udp dport 5000 dnat ip to 1.1.1.1:5000	ip daddr 1.1.1.1 udp dport 5000 accept	ip daddr 1.1.1.1 masquerade
+EOF
+PATH="$tmp/bin:$PATH" timeout 5 bash "$script" delete 1 >/tmp/nftables-forwarder-delete-test.out
+[[ "$(wc -l < /var/lib/nftables-forwarder/rules.tsv)" -eq 1 ]] || fail "delete by number should remove one state row"
+PATH="$tmp/bin:$PATH" timeout 5 bash "$script" delete 1 >/tmp/nftables-forwarder-delete-test.out
+[[ ! -s /var/lib/nftables-forwarder/rules.tsv ]] || fail "delete by number should remove final state row"
 
 echo "shell menu tests OK"
