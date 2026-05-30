@@ -7,6 +7,7 @@
 - 纯 Shell 实现，不依赖 Python、Node.js 等运行环境
 - 直接运行脚本即可进入中文菜单
 - 支持添加、查看、按编号删除端口转发规则
+- 删除规则会同步清理底层 nftables 里的 DNAT/FORWARD/MASQUERADE 规则
 - 默认同时添加 TCP 和 UDP，菜单里无需选择协议
 - 命令行模式仍支持单独添加 TCP 或 UDP
 - 查看规则时只显示脚本记录的端口转发清单，不展示底层 nftables 规则
@@ -99,6 +100,18 @@ sudo ./nftables-forwarder.sh
 sudo ./nftables-forwarder.sh delete 2
 ```
 
+删除后会同步清理底层 nftables 规则：
+
+- `prerouting` 里的 DNAT 规则
+- `forward` 里的放行规则
+- 如果没有其它规则继续使用同一个目标 IP，会清理对应 `masquerade` 规则
+
+也可以用这个命令检查底层规则是否已删除：
+
+```bash
+sudo nft list table inet portfw
+```
+
 也保留按协议和监听端口删除的方式：
 
 ```bash
@@ -189,6 +202,24 @@ sudo ./nftables-forwarder.sh delete tcp 8080 10.0.0.2 80
 sudo ./nftables-forwarder.sh rm tcp 8080
 ```
 
+### 修复残留规则
+
+正常删除会同步清理底层 nftables 规则。
+
+如果你用旧版本脚本删除过，出现“菜单里没有，但 `sudo nft list table inet portfw` 里还有”的残留规则，可以运行：
+
+```bash
+sudo ./nftables-forwarder.sh clean
+```
+
+或：
+
+```bash
+sudo ./nftables-forwarder.sh repair
+```
+
+这个命令会清理不在脚本记录文件里的底层 nftables 残留规则。
+
 ### 清空规则
 
 ```bash
@@ -220,6 +251,8 @@ inet portfw
 /var/lib/nftables-forwarder/rules.tsv
 ```
 
+这个记录文件用于菜单显示和按编号删除。脚本会自动迁移旧格式记录，并用 `-` 表示未指定网卡，避免空字段导致删除规则时字段错位。
+
 添加规则时，脚本会启用 IPv4 转发：
 
 ```bash
@@ -234,6 +267,7 @@ sysctl -w net.ipv4.ip_forward=1
 - 其它发行版需要手动安装 `nftables`。
 - 本脚本只管理 `inet portfw` 表。
 - 不要把其它 nftables 规则写进 `inet portfw`。
+- 删除单条 TCP/UDP 规则时，只会删除对应协议，不会误删同端口的另一种协议。
 - 如果目标是外网 IP，并且对方防火墙只允许本机公网 IP 访问，`masquerade` 是必须的。
 - 因为开启了 `masquerade`，目标服务器看到的来源 IP 会是本机/转发机 IP，不是原始客户端 IP。
 - 脚本修改的是当前运行中的 nftables 规则；如果系统重启后规则丢失，需要重新运行脚本添加。
