@@ -23,7 +23,8 @@ menu_output="$(printf '5\n' | $script)"
 [[ "$menu_output" == *"已退出"* ]] || fail "choice 5 should exit cleanly"
 
 # Static source checks for the UX requirements. These avoid needing root/nft in CI.
-grep -q 'proto="${proto:-both}"' "$script" || fail "interactive add should default to both"
+grep -q 'local proto="both"' "$script" || fail "interactive add should default to both without asking protocol"
+! grep -q '协议 both/tcp/udp \[both\]' "$script" || fail "interactive add should not ask protocol"
 grep -q 'printf .*"编号" "协议" "监听端口"' "$script" || fail "list should print rule numbers"
 ! grep -q '当前 nftables 规则' "$script" || fail "list should not print raw nftables rules"
 grep -q 'delete_rule_by_number' "$script" || fail "script should support delete by number"

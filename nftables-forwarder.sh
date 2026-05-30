@@ -88,9 +88,8 @@ interactive_menu() {
 
 prompt_add_rule() {
   echo
-  echo "添加端口转发"
-  read -r -p "协议 both/tcp/udp [both]: " proto
-  proto="${proto:-both}"
+  echo "添加端口转发（默认同时添加 TCP 和 UDP）"
+  local proto="both"
   read -r -p "监听端口，例如 8080: " listen_port
   read -r -p "目标 IP，例如 10.0.0.2 或 1.1.1.1: " target_ip
   read -r -p "目标端口，例如 80: " target_port
