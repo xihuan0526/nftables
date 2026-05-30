@@ -224,12 +224,33 @@ migrate_state_file() {
   [[ -s "$STATE_FILE" ]] || return 0
   local tmp
   tmp="$(mktemp)"
-  while IFS=$'\t' read -r proto listen_port target_ip target_port iface nat_rule filter_rule post_rule rest; do
-    [[ -n "${proto:-}" ]] || continue
-    if [[ -z "${post_rule:-}" ]]; then
-      post_rule="ip daddr ${target_ip} masquerade"
+  while IFS=$'\t' read -r saved_proto saved_listen saved_target_ip saved_target_port field5 field6 field7 field8 rest; do
+    [[ -n "${saved_proto:-}" ]] || continue
+
+    local iface nat_rule filter_rule post_rule
+    if [[ "${field8:-}" == *"masquerade"* ]]; then
+      # Current format: proto, listen, target_ip, target_port, iface, nat, filter, post
+      iface="${field5:-}"
+      nat_rule="${field6:-}"
+      filter_rule="${field7:-}"
+      post_rule="${field8:-}"
+    else
+      # Old 7-column format: proto, listen, target_ip, target_port, iface, nat, filter
+      # Very old broken rows may miss iface; reconstruct rules defensively.
+      iface="${field5:-}"
+      nat_rule="${field6:-}"
+      filter_rule="${field7:-}"
+      post_rule="ip daddr ${saved_target_ip} masquerade"
     fi
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$proto" "$listen_port" "$target_ip" "$target_port" "$iface" "$nat_rule" "$filter_rule" "$post_rule" >> "$tmp"
+
+    if [[ -z "$filter_rule" || "$filter_rule" == *"masquerade"* ]]; then
+      iface=""
+      nat_rule="${saved_proto} dport ${saved_listen} dnat ip to ${saved_target_ip}:${saved_target_port}"
+      filter_rule="ip daddr ${saved_target_ip} ${saved_proto} dport ${saved_target_port} accept"
+      post_rule="ip daddr ${saved_target_ip} masquerade"
+    fi
+
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$saved_proto" "$saved_listen" "$saved_target_ip" "$saved_target_port" "$iface" "$nat_rule" "$filter_rule" "$post_rule" >> "$tmp"
   done < "$STATE_FILE"
   mv "$tmp" "$STATE_FILE"
 }

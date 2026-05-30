@@ -31,4 +31,39 @@ grep -q 'delete_rule_by_number' "$script" || fail "script should support delete 
 grep -q 'CHAIN_POSTROUTING="postrouting"' "$script" || fail "script should define postrouting chain"
 grep -q 'masquerade' "$script" || fail "script should add masquerade rules"
 
+# Regression test: adding two ports in one menu session should not corrupt proto variables.
+tmp="$(mktemp -d)"
+mkdir -p "$tmp/bin"
+cat > "$tmp/bin/nft" <<'SH'
+#!/usr/bin/env bash
+if [[ "$*" == list\ table* ]]; then exit 1; fi
+if [[ "$*" == list\ chain* ]]; then exit 1; fi
+exit 0
+SH
+cat > "$tmp/bin/sysctl" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+chmod +x "$tmp/bin/nft" "$tmp/bin/sysctl"
+rm -rf /var/lib/nftables-forwarder
+add_twice_output="$(PATH="$tmp/bin:$PATH" timeout 5 bash "$script" <<'EOF'
+1
+59306
+203.0.113.7
+59306
+
+
+1
+54695
+203.0.113.7
+54695
+
+
+5
+EOF
+)"
+[[ "$add_twice_output" != *"错误：协议只能是 both、tcp 或 udp"* ]] || fail "adding a second port should not trigger protocol error"
+[[ -f /var/lib/nftables-forwarder/rules.tsv ]] || fail "state file should be created"
+[[ "$(wc -l < /var/lib/nftables-forwarder/rules.tsv)" -eq 4 ]] || fail "two both-rules should create four state rows"
+
 echo "shell menu tests OK"
