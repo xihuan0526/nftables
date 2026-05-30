@@ -353,7 +353,7 @@ delete_matching_nft_rule() {
   output="$(nft --handle list chain inet "$TABLE" "$chain" 2>/dev/null || true)"
   handles="$(printf '%s\n' "$output" | grep -F -- "$rule" | sed -n 's/.* handle \([0-9][0-9]*\).*/\1/p' || true)"
   while IFS= read -r handle; do
-    [[ -n "$handle" ]] && nft delete rule inet "$TABLE" "$chain" handle "$handle" || true
+    [[ -n "$handle" ]] && nft delete rule inet "$TABLE" "$chain" handle "$handle" >/dev/null 2>&1 || true
   done <<< "$handles"
 }
 
