@@ -92,7 +92,7 @@ prompt_add_rule() {
   read -r -p "协议 both/tcp/udp [both]: " proto
   proto="${proto:-both}"
   read -r -p "监听端口，例如 8080: " listen_port
-  read -r -p "目标 IP，例如 10.0.0.2 或 163.223.125.7: " target_ip
+  read -r -p "目标 IP，例如 10.0.0.2 或 1.1.1.1: " target_ip
   read -r -p "目标端口，例如 80: " target_port
   read -r -p "入站网卡，可留空，例如 eth0: " iface
   add_rule "$proto" "$listen_port" "$target_ip" "$target_port" "$iface"
